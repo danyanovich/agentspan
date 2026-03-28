@@ -1,0 +1,26 @@
+{
+  "name": "agentspan",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AgentsPan world-oriented orchestration system",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "bin": {
+    "agentspan": "apps/cli/src/bin.js"
+  },
+  "scripts": {
+    "dev": "node apps/cli/src/bin.js dev",
+    "init": "node apps/cli/src/bin.js init",
+    "doctor": "node apps/cli/src/bin.js doctor",
+    "seed": "node apps/cli/src/bin.js seed",
+    "connect-openclaw": "node apps/cli/src/bin.js connect-openclaw",
+    "connect-runtime": "node apps/cli/src/bin.js connect-runtime",
+    "upgrade": "node apps/cli/src/bin.js upgrade",
+    "start:api": "node apps/api/src/server.js",
+    "start:web": "node apps/web/src/server.js",
+    "start:worker": "node apps/worker/src/worker.js"
+  }
+}
