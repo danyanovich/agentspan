@@ -10,6 +10,7 @@ import {
   makeId
 } from '../../../packages/domain/src/index.js';
 import { OpenClawAdapter } from '../../../packages/runtime-adapter-openclaw/src/index.js';
+import { CustomRuntimeAdapter } from '../../../packages/runtime-adapter-custom/src/index.js';
 import { generateWorldLayout } from '../../../packages/spatial/src/index.js';
 
 export class AgentsPanCore {
@@ -17,20 +18,40 @@ export class AgentsPanCore {
     this.store = new InMemoryEventStore();
     this.outbox = new Outbox();
     this.projections = new ProjectionEngine();
-    this.runtime = new OpenClawAdapter();
+
+    this.runtimes = {
+      openclaw: new OpenClawAdapter(),
+      custom: new CustomRuntimeAdapter()
+    };
+
+    this.tenants = {};
+    this.worlds = {};
+    this.scenePacks = {
+      'default-grid': {
+        id: 'default-grid',
+        name: 'Default Grid',
+        version: '1.0.0',
+        theme: 'minimal-light',
+        rendererType: 'canvas-2d',
+        zoneMappings: {},
+        stationMappings: {},
+        visualRules: { gridCell: 32 }
+      }
+    };
 
     this.store.subscribe((event) => {
       this.outbox.push(event);
       this.projections.consume(event);
     });
-
-    this.tenants = {};
-    this.worlds = {};
   }
 
   emit(event) {
     this.store.append(event);
     return event;
+  }
+
+  snapshot() {
+    return this.projections.snapshot();
   }
 
   createTenant(input) {
@@ -51,6 +72,15 @@ export class AgentsPanCore {
     this.worlds[world.id] = world;
     this.emit(domainEvent({ worldId: world.id, aggregateType: 'world', aggregateId: world.id, eventType: 'world_created', payload: world }));
 
+    const scenePack = this.scenePacks[world.scenePackId] ?? this.scenePacks['default-grid'];
+    this.emit(domainEvent({
+      worldId: world.id,
+      aggregateType: 'scene_pack',
+      aggregateId: scenePack.id,
+      eventType: 'scene_pack_attached',
+      payload: { worldId: world.id, scenePack }
+    }));
+
     const layout = generateWorldLayout({ zoneCount: 5, stationCount: 24 });
     for (const zone of layout.zones) {
       this.emit(domainEvent({ worldId: world.id, aggregateType: 'zone', aggregateId: zone.id, eventType: 'zone_created', payload: { ...zone, worldId: world.id } }));
@@ -65,10 +95,33 @@ export class AgentsPanCore {
     return world;
   }
 
+  attachScenePack({ worldId, scenePackId = 'default-grid' }) {
+    const scenePack = this.scenePacks[scenePackId] ?? this.scenePacks['default-grid'];
+    this.emit(domainEvent({
+      worldId,
+      aggregateType: 'scene_pack',
+      aggregateId: scenePack.id,
+      eventType: 'scene_pack_attached',
+      payload: { worldId, scenePack }
+    }));
+    return scenePack;
+  }
+
   createAgent(input) {
     const agent = createAgent(input);
     this.emit(domainEvent({ worldId: agent.worldId, aggregateType: 'agent', aggregateId: agent.id, eventType: 'agent_created', payload: agent }));
     return agent;
+  }
+
+  updateAgent({ agentId, worldId, patch }) {
+    this.emit(domainEvent({
+      worldId,
+      aggregateType: 'agent',
+      aggregateId: agentId,
+      eventType: 'agent_state_changed',
+      payload: patch
+    }));
+    return { id: agentId, ...patch };
   }
 
   createGoal(input) {
@@ -94,8 +147,30 @@ export class AgentsPanCore {
     return { taskId, assignedTo };
   }
 
+  cancelTask({ worldId, taskId, reason = 'cancelled_by_user' }) {
+    this.emit(domainEvent({
+      worldId,
+      aggregateType: 'task',
+      aggregateId: taskId,
+      eventType: 'task_split',
+      payload: { status: 'cancelled', reason }
+    }));
+    return { taskId, status: 'cancelled', reason };
+  }
+
+  reviewTask({ worldId, taskId, reviewState = 'in_review', comment = '' }) {
+    this.emit(domainEvent({
+      worldId,
+      aggregateType: 'artifact',
+      aggregateId: taskId,
+      eventType: reviewState === 'approved' ? 'artifact_approved' : 'artifact_review_requested',
+      payload: { taskId, reviewState, comment }
+    }));
+    return { taskId, reviewState, comment };
+  }
+
   startRun({ worldId, taskId, agentId, input }) {
-    const runtime = this.runtime.startRun({ taskId, agentId, input });
+    const runtime = this.runtimes.openclaw.startRun({ taskId, agentId, input });
     const run = {
       id: makeId('run'),
       taskId,
@@ -116,6 +191,52 @@ export class AgentsPanCore {
     return run;
   }
 
+  syncRunStatus({ worldId, runId, status, output = null, failureReason = null }) {
+    this.emit(domainEvent({
+      worldId,
+      aggregateType: 'run',
+      aggregateId: runId,
+      eventType: 'run_status_synced',
+      payload: {
+        status,
+        output,
+        failureReason,
+        endedAt: ['completed', 'failed', 'stopped', 'cancelled'].includes(status) ? new Date().toISOString() : null
+      }
+    }));
+    return { runId, status, output, failureReason };
+  }
+
+  retryRun({ worldId, runId }) {
+    const run = this.snapshot().operational.runs[runId];
+    if (!run) throw new Error(`Run not found: ${runId}`);
+    return this.startRun({ worldId, taskId: run.taskId, agentId: run.agentId, input: run.input });
+  }
+
+  stopRun({ worldId, runId }) {
+    return this.syncRunStatus({ worldId, runId, status: 'stopped' });
+  }
+
+  createHandoff({ worldId, fromAgentId, toAgentId, taskId, artifactIds = [], reason = 'handoff' }) {
+    const handoff = {
+      id: makeId('handoff'),
+      fromAgentId,
+      toAgentId,
+      taskId,
+      artifactIds,
+      reason,
+      status: 'completed'
+    };
+    this.emit(domainEvent({
+      worldId,
+      aggregateType: 'handoff',
+      aggregateId: handoff.id,
+      eventType: 'handoff_completed',
+      payload: handoff
+    }));
+    return handoff;
+  }
+
   createArtifact({ worldId, producerRunId, producerAgentId, type = 'document', title, contentRef }) {
     const artifact = {
       id: makeId('artifact'),
@@ -131,6 +252,20 @@ export class AgentsPanCore {
     };
     this.emit(domainEvent({ worldId, aggregateType: 'artifact', aggregateId: artifact.id, eventType: 'artifact_created', payload: artifact }));
     return artifact;
+  }
+
+  connectRuntime({ worldId, runtimeType = 'openclaw', bindingName = 'default' }) {
+    const adapter = this.runtimes[runtimeType];
+    if (!adapter) throw new Error(`Unknown runtime: ${runtimeType}`);
+    const binding = adapter.createAgentBinding({ worldId, bindingName });
+    this.emit(domainEvent({
+      worldId,
+      aggregateType: 'runtime_binding',
+      aggregateId: binding.bindingId,
+      eventType: 'runtime_bound',
+      payload: { runtimeType, ...binding }
+    }));
+    return binding;
   }
 }
 

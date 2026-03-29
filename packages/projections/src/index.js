@@ -1,16 +1,21 @@
 export function createProjectionState() {
   return {
     operational: {
+      tenant: null,
+      world: null,
+      scenePack: null,
       agents: {},
       goals: {},
       tasks: {},
       runs: {},
+      handoffs: {},
       artifacts: {},
       alerts: [],
       events: []
     },
     spatial: {
       world: null,
+      scenePack: null,
       zones: {},
       stations: {},
       links: {},
@@ -38,8 +43,16 @@ export function applyEvent(state, event) {
   state.analytics.counters.events += 1;
 
   switch (event.eventType) {
+    case 'tenant_created':
+      state.operational.tenant = event.payload;
+      break;
     case 'world_created':
+      state.operational.world = event.payload;
       state.spatial.world = event.payload;
+      break;
+    case 'scene_pack_attached':
+      state.operational.scenePack = event.payload.scenePack;
+      state.spatial.scenePack = event.payload.scenePack;
       break;
     case 'zone_created':
       state.spatial.zones[event.aggregateId] = event.payload;
@@ -78,6 +91,14 @@ export function applyEvent(state, event) {
         state.operational.tasks[event.aggregateId].assignedTo = event.payload.assignedTo;
       }
       break;
+    case 'task_split':
+      if (state.operational.tasks[event.aggregateId]) {
+        state.operational.tasks[event.aggregateId] = {
+          ...state.operational.tasks[event.aggregateId],
+          ...event.payload
+        };
+      }
+      break;
     case 'run_started':
       state.operational.runs[event.aggregateId] = event.payload;
       state.analytics.counters.runsActive += 1;
@@ -90,14 +111,27 @@ export function applyEvent(state, event) {
         };
       }
       break;
+    case 'handoff_completed':
+      state.operational.handoffs[event.aggregateId] = event.payload;
+      break;
     case 'artifact_created':
       state.operational.artifacts[event.aggregateId] = event.payload;
       state.spatial.artifacts[event.aggregateId] = event.payload;
       state.analytics.counters.artifactsTotal += 1;
       break;
+    case 'artifact_review_requested':
+    case 'artifact_review_failed':
+    case 'artifact_approved': {
+      const artifactId = event.payload.artifactId ?? event.aggregateId;
+      if (state.operational.artifacts[artifactId]) {
+        state.operational.artifacts[artifactId].reviewState = event.payload.reviewState ?? event.eventType.replace('artifact_', '');
+      }
+      break;
+    }
     case 'queue_overloaded':
     case 'zone_alerted':
     case 'station_degraded':
+    case 'agent_stressed':
       state.operational.alerts.unshift(event);
       state.spatial.overlays.alerts.unshift(event);
       break;
